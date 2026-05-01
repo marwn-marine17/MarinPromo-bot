@@ -1,6 +1,7 @@
 {
-  "name": "ali-bot",
+  "name": "ali-express-pro-bot",
   "version": "1.0.0",
+  "description": "AliExpress Affiliate Bot with AI and Deep Scraping",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
