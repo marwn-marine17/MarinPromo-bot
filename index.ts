@@ -1,104 +1,115 @@
 import express from "express";
 import { Telegraf, Markup } from "telegraf";
 import axios from "axios";
+import * as cheerio from "cheerio";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import dotenv from "dotenv";
 
 dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// إعدادات المفاتيح
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
+const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const ALI_TRACKING_ID = process.env.ALIEXPRESS_TRACKING_ID || "MarinePromo";
 
-if (!botToken) throw new Error("TELEGRAM_BOT_TOKEN is required!");
+if (!botToken) throw new Error("TELEGRAM_BOT_TOKEN missing!");
+
 const bot = new Telegraf(botToken);
+const genAI = new GoogleGenerativeAI(GEMINI_KEY || "");
+const aiModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
 /**
- * محرك استخراج ID المنتج المطور - يدعم كافة أنواع الروابط
+ * وظيفة لجلب بيانات المنتج (العنوان والصورة والرقم) عبر الكشط الذكي
  */
-async function getAliExpressId(url: string): Promise<string | null> {
+async function fetchProductDetails(url: string) {
     try {
         let finalUrl = url;
-
-        // إذا كان الرابط مختصراً، نحاول تتبعه للحصول على الرابط الطويل
-        if (url.includes("/e/") || url.includes("a.aliexpress.com")) {
-            try {
-                const response = await axios.get(url, {
-                    maxRedirects: 5,
-                    headers: {
-                        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-                    },
-                    timeout: 8000
-                });
-                finalUrl = response.request.res.responseUrl || url;
-            } catch (e) {
-                // إذا فشل الطلب المباشر، نحاول استخراج الـ ID من الرابط نفسه كحل أخير
-                console.log("Redirect failed, checking URL directly...");
-            }
+        // تتبع الروابط المختصرة
+        if (url.includes("/e/") || url.includes("a.aliexpress.com") || url.includes("s.click")) {
+            const res = await axios.get(url, {
+                maxRedirects: 15,
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+                timeout: 10000
+            });
+            finalUrl = res.request.res.responseUrl || url;
         }
 
-        // قائمة الأنماط للبحث عن الرقم (ID)
-        const patterns = [
-            /item\/(\d+)\.html/,
-            /(\d+)\.html/,
-            /id=(\d+)/,
-            /item\/(\d+)/,
-            /\/(\d+)\?/
-        ];
+        const response = await axios.get(finalUrl, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+        });
 
-        for (const pattern of patterns) {
-            const match = finalUrl.match(pattern);
-            if (match && match[1]) return match[1];
-        }
+        const $ = cheerio.load(response.data);
+        const title = $('meta[property="og:title"]').attr('content')?.split('|')[0].trim() || "منتج AliExpress المميز";
+        const image = $('meta[property="og:image"]').attr('content') || "";
+        
+        const idMatch = finalUrl.match(/(\d{10,20})/);
+        const productId = idMatch ? idMatch[1] : null;
 
-        return null;
-    } catch (error) {
+        return { title, image, productId };
+    } catch (e) {
         return null;
     }
 }
 
-bot.start((ctx) => ctx.reply("✨ أهلاً بك! أرسل لي رابط المنتج وسأجهز لك روابط الخصم فوراً."));
+/**
+ * وظيفة توليد نصيحة تسوق ذكية باستخدام Gemini
+ */
+async function generateSmartAdvice(productTitle: string) {
+    if (!GEMINI_KEY) return "💎 اجري تخفيض ممتاز";
+    try {
+        const prompt = `أعطني جملة تسويقية قصيرة جداً ومغرية باللغة العربية عن هذا المنتج: "${productTitle}". ابدأ بإيموجي جوهرة أو شرارة.`;
+        const result = await aiModel.generateContent(prompt);
+        return result.response.text().trim();
+    } catch (e) {
+        return "💎 اجري تخفيض ممتاز";
+    }
+}
+
+bot.start((ctx) => ctx.reply("✨ مرحباً بك! أرسل لي رابط AliExpress وسأقوم بتجهيز العروض لك بالصور والذكاء الاصطناعي."));
 
 bot.on("text", async (ctx) => {
     const text = ctx.message.text;
-    
-    if (text.includes("aliexpress.com")) {
-        const statusMsg = await ctx.reply("🔍 جاري فحص الرابط وفك التشفير...");
+    if (text.includes("aliexpress.com") || text.includes("s.click")) {
+        const waitMsg = await ctx.reply("🔍 جاري جلب تفاصيل المنتج وتحليله بالذكاء الاصطناعي...");
 
-        const productId = await getAliExpressId(text);
+        const product = await fetchProductDetails(text);
 
-        if (!productId) {
-            return ctx.telegram.editMessageText(
-                ctx.chat.id, 
-                statusMsg.message_id, 
-                undefined, 
-                "❌ عذراً، لم أتمكن من استخراج بيانات المنتج. \n💡 نصيحة: جرب نسخ الرابط من المتصفح مباشرة بدلاً من زر المشاركة."
-            );
+        if (!product || !product.productId) {
+            return ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, "⚠️ عذراً، لم أتمكن من الوصول لبيانات المنتج.");
         }
 
-        // إنشاء الروابط الذكية
-        const mainLink = `https://s.click.aliexpress.com/e/_DdG7pXp?productId=${productId}&trackingId=${ALI_TRACKING_ID}`;
-        const superDeals = `https://s.click.aliexpress.com/e/_DdG7pXp?productId=${productId}&promotion=super&trackingId=${ALI_TRACKING_ID}`;
-        const choiceLink = `https://s.click.aliexpress.com/e/_DdG7pXp?productId=${productId}&promotion=choice&trackingId=${ALI_TRACKING_ID}`;
+        const aiAdvice = await generateSmartAdvice(product.title);
+
+        // إنشاء روابط الأفلييت
+        const mainLink = `https://s.click.aliexpress.com/e/_DdG7pXp?productId=${product.productId}&trackingId=${ALI_TRACKING_ID}`;
+        const superDeals = `https://s.click.aliexpress.com/e/_DdG7pXp?productId=${product.productId}&promotion=super&trackingId=${ALI_TRACKING_ID}`;
+        const choiceLink = `https://s.click.aliexpress.com/e/_DdG7pXp?productId=${product.productId}&promotion=choice&trackingId=${ALI_TRACKING_ID}`;
 
         const keyboard = Markup.inlineKeyboard([
-            [Markup.button.url("🛒 شراء الآن (خصم مباشر)", mainLink)],
+            [Markup.button.url("🛒 شراء الآن (الخصم الرئيسي)", mainLink)],
             [Markup.button.url("🔥 عروض السوبر ديلز", superDeals)],
-            [Markup.button.url("✨ عروض Choice المميزة", choiceLink)]
+            [Markup.button.url("✨ عروض تشويس Choice", choiceLink)]
         ]);
 
-        const message = `✅ <b>تم استخراج العروض بنجاح!</b>\n\n📦 <b>ID المنتج:</b> <code>${productId}</code>\n\n💰 استعمل الروابط أدناه للحصول على أفضل سعر متاح حالياً:`;
+        const caption = `${aiAdvice}\n\n📦 <b>${product.title}</b>\n\n✨ <i>استخدم الروابط أدناه للحصول على الخصم المباشر:</i>`;
 
-        await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, message, {
-            parse_mode: "HTML",
-            ...keyboard
-        });
+        try {
+            // حذف رسالة الانتظار وإرسال الصورة مع البيانات
+            await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id);
+            if (product.image) {
+                await ctx.replyWithPhoto(product.image, { caption, parse_mode: "HTML", ...keyboard });
+            } else {
+                await ctx.reply(caption, { parse_mode: "HTML", ...keyboard });
+            }
+        } catch (err) {
+            await ctx.reply(caption, { parse_mode: "HTML", ...keyboard });
+        }
     }
 });
 
-// لضمان بقاء البوت حياً على Render
-app.get("/", (req, res) => res.send("Bot is Live 🚀"));
+app.get("/", (req, res) => res.send("Bot is Active with AI 🚀"));
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
     bot.launch();
