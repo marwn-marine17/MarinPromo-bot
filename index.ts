@@ -1,45 +1,44 @@
 import express from "express";
 import { Telegraf, Markup } from "telegraf";
 import axios from "axios";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import dotenv from "dotenv";
 
 dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// الإعدادات الأساسية
+// الإعدادات الأساسية (توكن البوت ومعرف التتبع فقط)
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
-const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const ALI_TRACKING_ID = process.env.ALIEXPRESS_TRACKING_ID || "MarinePromo";
 
-const bot = new Telegraf(botToken!);
-const genAI = new GoogleGenerativeAI(GEMINI_KEY || "");
-const aiModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+if (!botToken) throw new Error("TELEGRAM_BOT_TOKEN is missing!");
+const bot = new Telegraf(botToken);
 
 /**
- * دالة بسيطة لاستخراج معرف المنتج
+ * دالة استخراج معرف المنتج بشكل مباشر وسلس
  */
 async function extractId(url: string): Promise<string | null> {
     try {
         let finalUrl = url;
-        // محاولة تتبع الرابط إذا كان مختصراً بشكل بسيط
+        // تتبع الروابط المختصرة
         if (url.includes("/e/") || url.includes("a.aliexpress.com")) {
             const res = await axios.get(url, { maxRedirects: 10, timeout: 8000 });
             finalUrl = res.request.res.responseUrl || url;
         }
         
-        // البحث عن الرقم في الرابط النهائي
-        const match = finalUrl.match(/item\/(\d+)\.html/) || finalUrl.match(/id=(\d+)/) || finalUrl.match(/(\d{11,15})/);
+        // البحث عن الرقم التسلسلي للمنتج
+        const match = finalUrl.match(/item\/(\d+)\.html/) || 
+                      finalUrl.match(/id=(\d+)/) || 
+                      finalUrl.match(/(\d{11,15})/);
         return match ? match[1] : null;
     } catch (e) {
-        // في حال الخطأ، نبحث عن أي رقم طويل في الرابط الأصلي
+        // في حال فشل الاتصال، نبحث عن الرقم في نص الرابط نفسه
         const emergency = url.match(/(\d{11,15})/);
         return emergency ? emergency[1] : null;
     }
 }
 
-bot.start((ctx) => ctx.reply("👋 أهلاً بك! أرسل رابط AliExpress للحصول على عروض الخصم."));
+bot.start((ctx) => ctx.reply("👋 أهلاً بك! أرسل لي رابط منتج AliExpress للحصول على عروض الخصم."));
 
 bot.on("text", async (ctx) => {
     const text = ctx.message.text;
@@ -52,7 +51,7 @@ bot.on("text", async (ctx) => {
             return ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, "⚠️ عذراً، لم أتمكن من العثور على رقم المنتج في هذا الرابط.");
         }
 
-        // إنشاء الروابط
+        // إنشاء روابط الأفلييت الخاصة بك
         const mainLink = `https://s.click.aliexpress.com/e/_DdG7pXp?productId=${productId}&trackingId=${ALI_TRACKING_ID}`;
         const superLink = `https://s.click.aliexpress.com/e/_DdG7pXp?productId=${productId}&promotion=super&trackingId=${ALI_TRACKING_ID}`;
         const choiceLink = `https://s.click.aliexpress.com/e/_DdG7pXp?productId=${productId}&promotion=choice&trackingId=${ALI_TRACKING_ID}`;
@@ -60,19 +59,11 @@ bot.on("text", async (ctx) => {
         const keyboard = Markup.inlineKeyboard([
             [Markup.button.url("🛒 شراء الآن (الخصم الرئيسي)", mainLink)],
             [Markup.button.url("🔥 عروض السوبر ديلز", superLink)],
-            [Markup.button.url("✨ عروض Choice", choiceLink)]
+            [Markup.button.url("✨ عروض Choice المميزة", choiceLink)]
         ]);
 
-        let aiMessage = "💎 اجري تخفيض ممتاز";
-        // إضافة لمسة AI بسيطة إذا كان المفتاح متاحاً
-        if (GEMINI_KEY) {
-            try {
-                const result = await aiModel.generateContent("أعطني جملة تشجيعية قصيرة جداً للتسوق من علي إكسبريس مع إيموجي.");
-                aiMessage = result.response.text().trim();
-            } catch (e) {}
-        }
-
-        const responseText = `${aiMessage}\n\n📦 <b>ID المنتج:</b> <code>${productId}</code>\n\n✨ استخدم الروابط أدناه للحصول على الخصم المباشر:`;
+        // الرسالة الثابتة والمنسقة
+        const responseText = `💎 <b>اجري تخفيض ممتاز</b>\n\n📦 <b>ID المنتج:</b> <code>${productId}</code>\n\n✨ استخدم الروابط أدناه للحصول على الخصم المباشر:`;
 
         await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, responseText, {
             parse_mode: "HTML",
@@ -81,8 +72,9 @@ bot.on("text", async (ctx) => {
     }
 });
 
-// السيرفر لضمان عمل Render
-app.get("/", (req, res) => res.send("Bot is Online"));
+// السيرفر لضمان عمل Render بشكل مستمر
+app.get("/", (req, res) => res.send("Bot is Online and Ready 🚀"));
 app.listen(PORT, () => {
+    console.log(`Server started on port ${PORT}`);
     bot.launch();
 });
