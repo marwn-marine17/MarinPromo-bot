@@ -1,94 +1,105 @@
 import express from "express";
 import { Telegraf, Markup } from "telegraf";
 import axios from "axios";
-import * as cheerio from "cheerio";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import dotenv from "dotenv";
-import crypto from "crypto";
 
 dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const ALI_APP_KEY = process.env.ALIEXPRESS_APP_KEY;
-const ALI_APP_SECRET = process.env.ALIEXPRESS_APP_SECRET;
-const ALI_TRACKING_ID = process.env.ALIEXPRESS_TRACKING_ID || "MarinePromo";
-const GATEWAY_URL = "https://api-sg.aliexpress.com/sync";
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
-const bot = new Telegraf(botToken!);
+const ALI_TRACKING_ID = process.env.ALIEXPRESS_TRACKING_ID || "MarinePromo";
+
+if (!botToken) throw new Error("TELEGRAM_BOT_TOKEN is required!");
+const bot = new Telegraf(botToken);
 
 /**
- * وظيفة محسنة لاستخراج ID المنتج حتى من الروابط المختصرة والمحمية
+ * محرك استخراج ID المنتج المطور - يدعم كافة أنواع الروابط
  */
-async function extractProductId(url: string): Promise<string | null> {
+async function getAliExpressId(url: string): Promise<string | null> {
     try {
-        let targetUrl = url;
-        if (url.includes("a.aliexpress.com")) {
-            const response = await axios.get(url, {
-                maxRedirects: 10,
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-                }
-            });
-            targetUrl = response.request.res.responseUrl || url;
+        let finalUrl = url;
+
+        // إذا كان الرابط مختصراً، نحاول تتبعه للحصول على الرابط الطويل
+        if (url.includes("/e/") || url.includes("a.aliexpress.com")) {
+            try {
+                const response = await axios.get(url, {
+                    maxRedirects: 5,
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+                    },
+                    timeout: 8000
+                });
+                finalUrl = response.request.res.responseUrl || url;
+            } catch (e) {
+                // إذا فشل الطلب المباشر، نحاول استخراج الـ ID من الرابط نفسه كحل أخير
+                console.log("Redirect failed, checking URL directly...");
+            }
         }
 
-        const patterns = [/item\/(\d+)\.html/, /id=(\d+)/, /\/(\d+)\.html/, /item\/(\d+)/];
+        // قائمة الأنماط للبحث عن الرقم (ID)
+        const patterns = [
+            /item\/(\d+)\.html/,
+            /(\d+)\.html/,
+            /id=(\d+)/,
+            /item\/(\d+)/,
+            /\/(\d+)\?/
+        ];
+
         for (const pattern of patterns) {
-            const match = targetUrl.match(pattern);
+            const match = finalUrl.match(pattern);
             if (match && match[1]) return match[1];
         }
+
         return null;
     } catch (error) {
-        console.error("Error extracting ID:", error);
         return null;
     }
 }
 
-bot.start((ctx) => ctx.reply("👋 أهلاً بك في بوت AliExpress المطور!\nأرسل لي أي رابط منتج وسأعطيك أفضل عرض وخصم."));
+bot.start((ctx) => ctx.reply("✨ أهلاً بك! أرسل لي رابط المنتج وسأجهز لك روابط الخصم فوراً."));
 
 bot.on("text", async (ctx) => {
     const text = ctx.message.text;
+    
     if (text.includes("aliexpress.com")) {
-        const waitMsg = await ctx.reply("🔍 جاري تحليل الرابط وتجهيز العروض...");
-        
-        try {
-            const productId = await extractProductId(text);
-            if (!productId) {
-                return ctx.reply("❌ عذراً، الرابط محمي أو غير صحيح. حاول إرسال رابط المنتج كاملاً من المتصفح.");
-            }
+        const statusMsg = await ctx.reply("🔍 جاري فحص الرابط وفك التشفير...");
 
-            // توليد روابط الأفلييت (رابط رئيسي، سوبر ديلز، وتشويس)
-            const affLink = `https://s.click.aliexpress.com/e/_DdG7pXp?productId=${productId}&trackingId=${ALI_TRACKING_ID}`;
-            const superDeals = `https://s.click.aliexpress.com/e/_DdG7pXp?productId=${productId}&promotion=super&trackingId=${ALI_TRACKING_ID}`;
-            const choiceLink = `https://s.click.aliexpress.com/e/_DdG7pXp?productId=${productId}&promotion=choice&trackingId=${ALI_TRACKING_ID}`;
+        const productId = await getAliExpressId(text);
 
-            const keyboard = Markup.inlineKeyboard([
-                [Markup.button.url("🛒 شراء الآن (الخصم الرئيسي)", affLink)],
-                [Markup.button.url("🔥 عروض السوبر ديلز", superDeals)],
-                [Markup.button.url("✨ عروض تشويس Choice", choiceLink)]
-            ]);
-
-            let message = `💎 <b>تم تجهيز روابط الخصم المباشر:</b>\n\n`;
-            message += `📌 <b>معرف المنتج:</b> <code>${productId}</code>\n\n`;
-            message += `🚀 استخدم الروابط أدناه للحصول على أقل سعر متاح حالياً:`;
-
-            await ctx.reply(message, { parse_mode: "HTML", ...keyboard });
-
-        } catch (error) {
-            await ctx.reply("❌ واجهت مشكلة أثناء معالجة الرابط.");
-        } finally {
-            try { await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id); } catch (e) {}
+        if (!productId) {
+            return ctx.telegram.editMessageText(
+                ctx.chat.id, 
+                statusMsg.message_id, 
+                undefined, 
+                "❌ عذراً، لم أتمكن من استخراج بيانات المنتج. \n💡 نصيحة: جرب نسخ الرابط من المتصفح مباشرة بدلاً من زر المشاركة."
+            );
         }
+
+        // إنشاء الروابط الذكية
+        const mainLink = `https://s.click.aliexpress.com/e/_DdG7pXp?productId=${productId}&trackingId=${ALI_TRACKING_ID}`;
+        const superDeals = `https://s.click.aliexpress.com/e/_DdG7pXp?productId=${productId}&promotion=super&trackingId=${ALI_TRACKING_ID}`;
+        const choiceLink = `https://s.click.aliexpress.com/e/_DdG7pXp?productId=${productId}&promotion=choice&trackingId=${ALI_TRACKING_ID}`;
+
+        const keyboard = Markup.inlineKeyboard([
+            [Markup.button.url("🛒 شراء الآن (خصم مباشر)", mainLink)],
+            [Markup.button.url("🔥 عروض السوبر ديلز", superDeals)],
+            [Markup.button.url("✨ عروض Choice المميزة", choiceLink)]
+        ]);
+
+        const message = `✅ <b>تم استخراج العروض بنجاح!</b>\n\n📦 <b>ID المنتج:</b> <code>${productId}</code>\n\n💰 استعمل الروابط أدناه للحصول على أفضل سعر متاح حالياً:`;
+
+        await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, undefined, message, {
+            parse_mode: "HTML",
+            ...keyboard
+        });
     }
 });
 
-app.get("/", (req, res) => res.send("Bot status: Online"));
-
+// لضمان بقاء البوت حياً على Render
+app.get("/", (req, res) => res.send("Bot is Live 🚀"));
 app.listen(PORT, () => {
-    console.log(`Server started on port ${PORT}`);
+    console.log(`Server running on port ${PORT}`);
     bot.launch();
 });
